@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>4重振り子ゴルフ</title>
+<style>
+:root{--hud:#fff;box-sizing:border-box}
+html,body{margin:0;height:100%;background:#7ec8e3;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none;font-family:-apple-system,"Hiragino Sans",sans-serif}
+canvas{display:block;width:100%;height:100%}
+#hud{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 0;display:flex;justify-content:space-between;color:var(--hud);text-shadow:0 1px 4px rgba(0,0,0,.5);pointer-events:none;font-weight:700}
+#hud small{display:block;font-size:12px;opacity:.85;font-weight:500}
+#hud b{font-size:28px}
+#msg{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 28px);text-align:center;color:#fff;font-size:17px;font-weight:700;text-shadow:0 1px 4px rgba(0,0,0,.6);pointer-events:none;padding:0 16px}
+#share{display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 84px);background:#000;color:#fff;padding:12px 24px;border-radius:999px;font-weight:700;font-size:16px;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div><small>飛距離</small><b id="dist">0.0</b> m</div><div style="text-align:center;font-size:13px"><small id="snaps"></small></div><div style="text-align:right"><small>ベスト</small><b id="best">0.0</b> m</div></div>
+<div id="msg"></div>
+<a id="share" target="_blank" rel="noopener noreferrer">𝕏 で結果をシェア</a>
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const $=id=>document.getElementById(id);
+let W,H,dpr;
+function resize(){dpr=window.devicePixelRatio||1;W=innerWidth;H=innerHeight;cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0)}
+addEventListener('resize',resize);resize();
+
+const N=4,L=2.1,G=9.8,PY=8.9,DAMP=0.005,BX=0.6,BY=0.5,MAXPHI=2.9;
+const TS=1.8;
+let th,om,state,ball,trail,t,phi=0,cock=0,best=0,camX=0,viewH=18,sx=0,sy=0,wind=0,shotN=0,scores=[],snaps=3;
+function pose(){th=[-phi,-phi,-phi-cock*0.9,-phi-cock*1.4]}
+try{best=parseFloat(localStorage.getItem('pgBest1'))||0}catch(e){}
+$('best').textContent=best.toFixed(1);
+
+function solve(A,b){
+  const n=b.length;
+  for(let i=0;i<n;i++){
+    let p=i;for(let r=i+1;r<n;r++)if(Math.abs(A[r][i])>Math.abs(A[p][i]))p=r;
+    [A[i],A[p]]=[A[p],A[i]];[b[i],b[p]]=[b[p],b[i]];
+    for(let r=i+1;r<n;r++){const f=A[r][i]/A[i][i];for(let c=i;c<n;c++)A[r][c]-=f*A[i][c];b[r]-=f*b[i]}
+  }
+  const x=new Array(n);
+  for(let i=n-1;i>=0;i--){let s=b[i];for(let c=i+1;c<n;c++)s-=A[i][c]*x[c];x[i]=s/A[i][i]}
+  return x;
+}
+function acc(t,w){
+  const A=[],b=[];
+  for(let i=0;i<N;i++){
+    A.push([]);let r=-(N-i)*G*L*Math.sin(t[i])-DAMP*w[i];
+    for(let j=0;j<N;j++){
+      const m=(N-Math.max(i,j))*L*L,d=t[i]-t[j];
+      A[i].push(m*Math.cos(d));r-=m*Math.sin(d)*w[j]*w[j];
+    }
+    b.push(r);
+  }
+  return solve(A,b);
+}
+const add=(a,b,s)=>a.map((v,i)=>v+s*b[i]);
+function rk4(dt){
+  const a1=acc(th,om);
+  const t2=add(th,om,dt/2),w2=add(om,a1,dt/2),a2=acc(t2,w2);
+  const t3=add(th,w2,dt/2),w3=add(om,a2,dt/2),a3=acc(t3,w3);
+  const t4=add(th,w3,dt),w4=add(om,a3,dt),a4=acc(t4,w4);
+  th=th.map((v,i)=>v+dt/6*(om[i]+2*w2[i]+2*w3[i]+w4[i]));
+  om=om.map((v,i)=>v+dt/6*(a1[i]+2*a2[i]+2*a3[i]+a4[i]));
+}
+function joints(){
+  const p=[[0,PY]];let x=0,y=PY;
+  for(let i=0;i<N;i++){x+=L*Math.sin(th[i]);y-=L*Math.cos(th[i]);p.push([x,y])}
+  return p;
+}
+function tipVel(){let vx=0,vy=0;for(let i=0;i<N;i++){vx+=L*Math.cos(th[i])*om[i];vy+=L*Math.sin(th[i])*om[i]}return[vx,vy]}
+
+function reset(){
+  th=[0,0,0,0];om=[0,0,0,0];state='ready';phi=0;cock=0;t=0;trail=[];snaps=3;
+  ball={x:BX,y:BY,vx:0,vy:0,tee:true,rest:false};
+  $('dist').textContent='0.0';
+  $('snaps').textContent='';$('share').style.display='none';
+  $('msg').textContent='左へドラッグ＝バックスイング／上へドラッグ＝コック';
+}
+reset();
+
+addEventListener('pointerdown',e=>{
+  if(e.target.closest&&e.target.closest('#share'))return;
+  e.preventDefault();
+  if(state==='ready'){state='pull';sx=e.clientX;sy=e.clientY}
+  else if(state==='swing'&&snaps>0){snaps--;for(let i=1;i<N;i++)om[i]+=2.6;$('snaps').textContent='スナップ残り'+snaps}
+  else if(state==='done')reset();
+});
+addEventListener('pointermove',e=>{
+  if(state!=='pull')return;
+  phi=Math.max(0,Math.min(MAXPHI,(sx-e.clientX)/(Math.min(W,500)*0.6)*MAXPHI));
+  cock=Math.max(0,Math.min(1,(sy-e.clientY)/(H*0.3)));pose();
+  $('msg').textContent='バックスイング '+Math.round(phi*180/Math.PI)+'°　コック '+Math.round(cock*100)+'%';
+});
+addEventListener('pointerup',()=>{
+  if(state!=='pull')return;
+  if(phi>0.2){state='swing';om=[0,0,0,0];t=0;$('snaps').textContent='スナップ残り3';$('msg').textContent='タップでスナップ！（最大3回）'}
+  else{state='ready';th=[0,0,0,0];phi=0;cock=0}
+});
+
+function checkHit(){
+  if(!ball.tee)return;
+  const p=joints()[N],dx=ball.x-p[0],dy=ball.y-p[1],d=Math.hypot(dx,dy);
+  if(d>0.48)return;
+  const [vx,vy]=tipVel(),nx=dx/d,ny=dy/d,vn=vx*nx+vy*ny;
+  if(vn<0.3)return;
+  let bx=nx*vn*1.85+(vx-nx*vn)*0.4,by=ny*vn*1.85+(vy-ny*vn)*0.4;
+  by+=0.15*Math.hypot(bx,by);
+  const ang=Math.atan2(by,bx)*180/Math.PI,sp=Math.hypot(bx,by),off=Math.abs(vx*dy-vy*dx)/Math.hypot(vx,vy);
+  let q='';
+  if(ang>12&&ang<40&&off<0.2){bx*=1.12;by*=1.12;q='ナイスショット！ '}
+  else if(ang<5)q='トップ… ';else if(ang>60)q='テンプラ… ';
+  ball.vx=bx;ball.vy=by;ball.tee=false;state='fly';
+  $('msg').textContent=q+Math.round(sp*3.6)+'km/h　打出し角'+Math.round(ang)+'°';
+}
+function stepBall(dt){
+  const b=ball;
+  if(b.y<=0.001&&Math.abs(b.vy)<0.01){
+    b.y=0;b.vy=0;const s=Math.sign(b.vx);b.vx-=s*1.5*dt;
+    if(Math.sign(b.vx)!==s||Math.abs(b.vx)<0.05){b.vx=0;b.rest=true}
+    b.x+=b.vx*dt;return;
+  }
+  const rx=b.vx-wind,sp=Math.hypot(rx,b.vy),k=0.005;
+  b.vx+=-k*sp*rx*dt;b.vy+=(-G-k*sp*b.vy)*dt;
+  b.x+=b.vx*dt;b.y+=b.vy*dt;
+  if(b.y<=0){b.y=0;if(b.vy<-1.2){b.vy=-b.vy*0.42;b.vx*=0.78}else b.vy=0}
+}
+
+const SHARE_URL='https://claude.ai/artifact/TGfVo1C1D8qJrnKBE5NUpp';
+function setShare(tot){
+  const txt='4重振り子ゴルフ ⛳ '+tot.toFixed(1)+'m 飛ばした！（ベスト '+best.toFixed(1)+'m）#4重振り子ゴルフ';
+  const a=$('share');
+  a.href='https://twitter.com/intent/tweet?text='+encodeURIComponent(txt)+'&url='+encodeURIComponent(SHARE_URL);
+  a.style.display='block';
+}
+function finish(d){
+  state='done';
+  const nb=d>best;if(nb){best=d;try{localStorage.setItem('pgBest1',best)}catch(e){}$('best').textContent=best.toFixed(1)}
+  if(d>0){
+    $('msg').textContent=d.toFixed(1)+' m'+(nb?' 🏆ベスト更新！':'')+'　タップでもう一度';setShare(d);
+  }else $('msg').textContent='空振り　タップでもう一度';
+}
+function frame(){
+  if(state==='swing'||state==='fly'||state==='done'){
+    const dt=TS/420;
+    for(let i=0;i<7;i++){
+      rk4(dt);
+      if(state==='swing')checkHit();
+      if(state==='fly'&&!ball.rest)stepBall(dt);
+    }
+    t+=TS/60;
+  }
+  if(state==='swing'&&t>7)finish(0);
+  if(state==='fly'){
+    const l=trail[trail.length-1];
+    if(!l||Math.hypot(ball.x-l[0],ball.y-l[1])>0.4)trail.push([ball.x,ball.y]);
+    $('dist').textContent=(ball.x-BX).toFixed(1);
+    if(ball.rest)finish(Math.max(0,ball.x-BX));
+  }
+  const hit=!ball.tee,tx=hit?ball.x+5:0,tv=hit?Math.max(16,ball.y*1.5+4):18;
+  camX+=(tx-camX)*0.12;viewH+=(tv-viewH)*0.08;
+  draw();requestAnimationFrame(frame);
+}
+
+function draw(){
+  const s=Math.min(H/(viewH+1.2),W/22);
+  const X=x=>W/2+(x-camX)*s,Y=y=>H-s*1.2-y*s;
+  const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#4aa3d8');g.addColorStop(1,'#bfe6f5');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#4caf50';ctx.fillRect(0,Y(0),W,H-Y(0));
+  ctx.fillStyle='#388e3c';ctx.fillRect(0,Y(0),W,3);
+  const vw=W/s,step=vw>60?50:vw>30?20:10,x0=camX-vw/2,x1=camX+vw/2;
+  ctx.fillStyle='#fff';ctx.font='12px sans-serif';ctx.textAlign='center';
+  for(let m=Math.ceil(x0/step)*step;m<=x1;m+=step){ctx.fillRect(X(m)-1,Y(0),2,10);ctx.fillText(m+'m',X(m),Y(0)+26)}
+  // tee
+  ctx.fillStyle='#e0b070';ctx.beginPath();
+  ctx.moveTo(X(BX-0.25),Y(0.32));ctx.lineTo(X(BX+0.25),Y(0.32));ctx.lineTo(X(BX+0.04),Y(0));ctx.lineTo(X(BX-0.04),Y(0));ctx.fill();
+  // club
+  const p=joints();
+  ctx.lineCap='round';ctx.strokeStyle='#37474f';ctx.lineWidth=Math.max(3,s*0.12);
+  ctx.beginPath();ctx.moveTo(X(p[0][0]),Y(p[0][1]));
+  for(let i=1;i<=N;i++)ctx.lineTo(X(p[i][0]),Y(p[i][1]));ctx.stroke();
+  ctx.fillStyle='#ff7043';
+  for(let i=0;i<N;i++){ctx.beginPath();ctx.arc(X(p[i][0]),Y(p[i][1]),Math.max(4,s*0.18),0,7);ctx.fill()}
+  ctx.fillStyle='#455a64';ctx.beginPath();ctx.arc(X(p[N][0]),Y(p[N][1]),Math.max(5,s*0.3),0,7);ctx.fill();
+  if(trail.length>1){
+    ctx.strokeStyle='rgba(255,255,255,.7)';ctx.lineWidth=2;ctx.setLineDash([4,6]);
+    ctx.beginPath();trail.forEach((q,i)=>i?ctx.lineTo(X(q[0]),Y(q[1])):ctx.moveTo(X(q[0]),Y(q[1])));ctx.stroke();ctx.setLineDash([]);
+  }
+  if(!ball.tee){ctx.fillStyle='rgba(0,0,0,.2)';ctx.beginPath();ctx.ellipse(X(ball.x),Y(0)+2,Math.max(3,s*0.2)/(1+ball.y*0.1),2,0,0,7);ctx.fill()}
+  ctx.fillStyle='#fff';ctx.strokeStyle='#999';ctx.lineWidth=1;
+  ctx.beginPath();ctx.arc(X(ball.x),Y(ball.y),Math.max(4,s*0.21),0,7);ctx.fill();ctx.stroke();
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
